@@ -4,6 +4,7 @@ from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import FlaskSessionCacheHandler
 from collections import Counter
+import random
 
 # --- Spotify API credentials ---
 client_id = "edb8e43341cd46eb8c240d3bfd01e590"
@@ -131,8 +132,9 @@ def create_smart_playlist():
 
     user_id = sp.current_user()['id']
     playlist_name = request.form.get("playlist_name") or "Smart Playlist"
-    playlist_description = "Songs from your most recent listens!"
+    playlist_description = "Songs from your recent listens and recommendations!"
 
+    # Create the playlist
     new_playlist = sp.user_playlist_create(
         user=user_id,
         name=playlist_name,
@@ -140,40 +142,65 @@ def create_smart_playlist():
         description=playlist_description
     )
 
-    track_uris = set()
+    # --- Gather top tracks and top artist tracks ---
+    track_uris = []
+    seen_tracks = set()
 
-    # Add top tracks
+    # 1. User's top tracks
     top_tracks_data = sp.current_user_top_tracks(limit=20, time_range='short_term')
     for track in top_tracks_data['items']:
-        track_uris.add(track['uri'])
+        track_uris.append(track['uri'])
+        seen_tracks.add(track['uri'])
 
-    # Add top artist tracks
+    # 2. Top tracks from top artists
     top_artists_data = sp.current_user_top_artists(limit=10, time_range='short_term')
     for artist in top_artists_data['items']:
-        top_tracks_artist = sp.artist_top_tracks(artist['id'])
-        for track in top_tracks_artist['tracks'][:2]:
-            track_uris.add(track['uri'])
+        top_artist_tracks = sp.artist_top_tracks(artist['id'])['tracks'][:2]
+        for track in top_artist_tracks:
+            if track['uri'] not in seen_tracks:
+                track_uris.append(track['uri'])
+                seen_tracks.add(track['uri'])
 
-    # Add genre-based recommendations
-    genres = []
-    for artist in top_artists_data['items']:
-        genres.extend(artist['genres'])
-    genre_counts = Counter(genres)
-    top_genres = [genre for genre, _ in genre_counts.most_common(3)]
+    # --- Recommendations based on top tracks and top artists ---
+    seed_tracks = [track['id'] for track in top_tracks_data['items'][:2]]  # max 2
+    seed_artists = [artist['id'] for artist in top_artists_data['items'][:3]]  # max 3
 
-    for genre in top_genres:
-        results = sp.search(q=f"genre:\"{genre}\"", type='artist', limit=5)
-        for artist in results['artists']['items']:
-            top_tracks_artist = sp.artist_top_tracks(artist['id'])
-            if top_tracks_artist['tracks']:
-                track_uris.add(top_tracks_artist['tracks'][0]['uri'])
+    # Ensure total seeds <= 5
+    while len(seed_tracks) + len(seed_artists) > 5:
+        if len(seed_tracks) > len(seed_artists):
+            seed_tracks.pop()
+        else:
+            seed_artists.pop()
 
+    recommendations = []
+    if seed_tracks or seed_artists:
+        try:
+            rec_data = sp.recommendations(
+                seed_tracks=seed_tracks,
+                seed_artists=seed_artists,
+                limit=20
+            )
+            recommendations = rec_data['tracks']
+        except Exception as e:
+            print("Spotify recommendations failed:", e)
+
+    # Add recommended tracks
+    for track in recommendations:
+        if track['uri'] not in seen_tracks:
+            track_uris.append(track['uri'])
+            seen_tracks.add(track['uri'])
+
+    # --- Shuffle the tracks ---
+    random.shuffle(track_uris)
+
+    # Add all tracks to playlist
     if track_uris:
-        sp.playlist_add_items(new_playlist['id'], list(track_uris))
+        sp.playlist_add_items(new_playlist['id'], track_uris)
 
     return f"✅ Smart Playlist '{playlist_name}' created!<br>" \
            f"<a href='{new_playlist['external_urls']['spotify']}' target='_blank'>Open it on Spotify</a><br>" \
            f"<a href='/get_playlists'>Go back</a>"
+
 
 
 @app.route("/now_playing", methods=["GET", "POST"])
