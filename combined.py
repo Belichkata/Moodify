@@ -6,6 +6,7 @@ import cv2
 import mediapipe as mp
 import math
 import random
+from datetime import datetime
 from flask import Flask, session, redirect, url_for, request, render_template_string
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
@@ -39,8 +40,6 @@ sp_oauth = SpotifyOAuth(
 # ---------------- Global State ----------------
 monitoring_thread = None
 monitoring_active = False
-created_playlist_id = None
-spotify_token_info = None
 driver_state = "Calm"
 playlist_created = False
 combined_file = "combined_data.json"
@@ -51,11 +50,7 @@ LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 UPPER_LIP = [13, 14]
 LOWER_LIP = [14, 17]
-EYE_AR_THRESH = 0.3
-DROWSY_EYE_TIME = 5.0
-YAWN_LIMIT = 3
 MOUTH_OPEN_THRESH = 0.65
-YAWN_WINDOW = 10
 
 # ---------------- Mood Parameters ----------------
 MOOD_PARAMS = {
@@ -107,7 +102,7 @@ def update_json():
 # ---------------- Spotify Helpers ----------------
 def get_spotify_client():
     global spotify_token_info
-    if spotify_token_info is None:
+    if 'spotify_token_info' not in globals() or spotify_token_info is None:
         return None
     if sp_oauth.is_token_expired(spotify_token_info):
         try:
@@ -121,57 +116,35 @@ def fetch_user_top_data(sp):
     try:
         top_artists = sp.current_user_top_artists(limit=5, time_range='medium_term')['items']
         top_artist_ids = [a['id'] for a in top_artists]
-        top_genres = [g for a in top_artists for g in a['genres']]
-        return top_artist_ids, top_genres
+        return top_artist_ids
     except Exception as e:
         print(f"Error fetching top artists: {e}")
-        return [], []
+        return []
 
-def create_smart_playlist_fixed(sp, total_tracks=20):
-    global created_playlist_id, playlist_created, driver_state
-    state = driver_state
-    mood_genres = MOOD_GENRES[state]
-    mood_params = MOOD_PARAMS[state]
-    playlist_name = f"Drive Mood – {state} Mode"
-
+def create_smart_playlist(sp, state, total_tracks=20):
+    """
+    Creates a unique playlist for a given state.
+    """
     try:
         user_id = sp.current_user()['id']
-        playlist = sp.user_playlist_create(
-            user=user_id, name=playlist_name, public=False, description=mood_params['description']
-        )
-        created_playlist_id = playlist['id']
-    except Exception as e:
-        print(f"Error creating playlist: {e}")
-        return
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        playlist_name = f"Drive Mood – {state} – {timestamp}"
+        description = MOOD_PARAMS[state]['description']
 
-    # -------- Fetch user's top tracks --------
-    try:
+        playlist = sp.user_playlist_create(
+            user=user_id,
+            name=playlist_name,
+            public=False,
+            description=description
+        )
+        playlist_id = playlist['id']
+
+        # --- Fetch top tracks and discovery tracks ---
         top_tracks_full = sp.current_user_top_tracks(limit=50, time_range='medium_term')['items']
         top_tracks = [t for t in top_tracks_full if t.get('id')]
-        top_artists = [t['artists'][0]['id'] for t in top_tracks_full[:5]]
-    except Exception as e:
-        print(f"Error fetching top tracks: {e}")
-        top_tracks, top_artists = [], []
 
-    # -------- More robust genre match --------
-    def track_matches_genre(track):
-        try:
-            artist = track['artists'][0]
-            artist_info = sp.artist(artist['id'])
-            genres = [g.lower().replace("-", " ") for g in artist_info.get('genres', [])]
-            if not genres and state == "Calm":
-                return True  # allow genre-less calm artists
-            return any(any(mg in g for g in genres) for mg in mood_genres)
-        except Exception:
-            return False
-
-    # -------- Filter top tracks by mood genre --------
-    filtered_top = [t for t in top_tracks if track_matches_genre(t)]
-
-    # -------- Discovery tracks (wider net) --------
-    def get_discovery_tracks(sp, mood, max_tracks=50):
         discovery_tracks = []
-        keywords = SEARCH_KEYWORDS.get(mood, ["chill"])
+        keywords = SEARCH_KEYWORDS.get(state, ["chill"])
         for keyword in keywords:
             try:
                 results = sp.search(q=f"{keyword} playlist", type="playlist", limit=5)
@@ -182,72 +155,44 @@ def create_smart_playlist_fixed(sp, total_tracks=20):
                         track = i.get('track')
                         if track and track.get('uri') and track not in discovery_tracks:
                             discovery_tracks.append(track)
-                        if len(discovery_tracks) >= max_tracks:
-                            return discovery_tracks
+                        if len(discovery_tracks) >= 50:
+                            break
             except Exception as e:
                 print(f"Error searching {keyword}: {e}")
-        return discovery_tracks
 
-    discovery_tracks_full = get_discovery_tracks(sp, state, max_tracks=50)
-    filtered_discovery = [t for t in discovery_tracks_full if track_matches_genre(t)]
-
-    # -------- Spotify Recommendations --------
-    rec_tracks_full = []
-    try:
-        seed_tracks = [t.get('id') for t in top_tracks_full[:5] if t.get('id')]
-        seed_artists = list(dict.fromkeys(top_artists))[:5]
-        combined_seeds = seed_tracks + seed_artists
-        random.shuffle(combined_seeds)
-        combined_seeds = combined_seeds[:5]
-        rec_kwargs = {"limit": 10}
-        if seed_tracks:
-            rec_kwargs["seed_tracks"] = seed_tracks[:3]
-        if seed_artists:
-            rec_kwargs["seed_artists"] = seed_artists[:2]
-        rec_resp = sp.recommendations(**rec_kwargs)
-        rec_tracks_full = rec_resp.get("tracks", [])
-        print(f"✅ Got {len(rec_tracks_full)} recommendations for {state}.")
-    except Exception as e:
-        print(f"Error fetching recommendations: {e}")
-
-    # -------- Combine, deduplicate, and fill gaps --------
-    combined = filtered_top[:15] + filtered_discovery[:20] + rec_tracks_full
-    seen, unique_tracks = set(), []
-    for track in combined:
-        if not track:
-            continue
-        name = track['name'].strip().lower()
-        artist = track['artists'][0]['name'].strip().lower()
-        key = f"{name}-{artist}"
-        if key not in seen:
-            seen.add(key)
-            unique_tracks.append(track)
-
-    # If we didn’t reach total_tracks, pad with unfiltered tracks
-    if len(unique_tracks) < total_tracks:
-        filler = (top_tracks_full + discovery_tracks_full + rec_tracks_full)
-        for t in filler:
+        # --- Combine, shuffle, and deduplicate ---
+        combined = top_tracks[:15] + discovery_tracks[:25]
+        seen, unique_tracks = set(), []
+        for t in combined:
             if not t:
                 continue
-            name = t['name'].strip().lower()
-            artist = t['artists'][0]['name'].strip().lower()
-            key = f"{name}-{artist}"
+            key = f"{t['name'].lower()}-{t['artists'][0]['name'].lower()}"
             if key not in seen:
                 seen.add(key)
                 unique_tracks.append(t)
-            if len(unique_tracks) >= total_tracks:
-                break
 
-    # Shuffle and trim
-    random.shuffle(unique_tracks)
-    final_uris = [t['uri'] for t in unique_tracks[:total_tracks]]
+        # Fill gaps if necessary
+        if len(unique_tracks) < total_tracks:
+            filler = top_tracks_full + discovery_tracks
+            for t in filler:
+                if not t:
+                    continue
+                key = f"{t['name'].lower()}-{t['artists'][0]['name'].lower()}"
+                if key not in seen:
+                    seen.add(key)
+                    unique_tracks.append(t)
+                if len(unique_tracks) >= total_tracks:
+                    break
 
-    try:
-        sp.playlist_add_items(created_playlist_id, final_uris)
-        print(f"✅ Created '{playlist_name}' with {len(final_uris)} *unique, mood-matched* tracks.")
+        random.shuffle(unique_tracks)
+        final_uris = [t['uri'] for t in unique_tracks[:total_tracks]]
+        sp.playlist_add_items(playlist_id, final_uris)
+        print(f"✅ Created '{playlist_name}' with {len(final_uris)} tracks.")
+        return playlist_id
+
     except Exception as e:
-        print(f"Error adding tracks: {e}")
-
+        print(f"Error creating playlist: {e}")
+        return None
 
 # ---------------- Driver Monitoring ----------------
 def monitor_driver():
@@ -255,26 +200,21 @@ def monitor_driver():
 
     cap = cv2.VideoCapture(0)
     driver_state = "Calm"
-
-    eye_closure_events = []  # for drowsy logic
-    yawns = []               # for drowsy logic
-
+    eye_closure_events = []
+    yawns = []
     alert_buffer_start = None
     blink_count_buffer = 0
-
     eye_closed_start = None
     eye_closed_duration = 0.0
+    monitor_start_time = time.time()
+    last_blink_time = time.time()
 
-    monitor_start_time = time.time()  # 30 s independent timer
-    last_blink_time = time.time()     # for Calm → Alert
-
-    # ---- Thresholds ----
-    BLINK_TIME_MAX = 0.5          # <0.5s = blink
-    DROWSY_EYE_TIME = 5.0         # ≥5s = drowsy closure
-    SEMICLOSED_TIME = 3.0         # ≥3s semi-closed = drowsy
-    NO_BLINK_ALERT_TIME = 8.0     # ≥8s no blink = alert
-    SEMICLOSED_EAR = 0.22         # between 0.15–0.25 indicates droopy
-    CLOSED_EAR = 0.18             # fully closed
+    BLINK_TIME_MAX = 0.5
+    DROWSY_EYE_TIME = 5.0
+    SEMICLOSED_TIME = 3.0
+    NO_BLINK_ALERT_TIME = 8.0
+    SEMICLOSED_EAR = 0.22
+    CLOSED_EAR = 0.18
 
     with mp_face_mesh.FaceMesh(
         max_num_faces=1,
@@ -296,6 +236,7 @@ def monitor_driver():
             blinked = False
             yawned = False
             semi_closed_detected = False
+            ear = 0.0
 
             if results.multi_face_landmarks:
                 face_landmarks = results.multi_face_landmarks[0]
@@ -303,21 +244,18 @@ def monitor_driver():
                 right_ear = eye_aspect_ratio(face_landmarks.landmark, RIGHT_EYE, w, h)
                 ear = (left_ear + right_ear) / 2.0
 
-                # ---- Eye logic ----
+                # Eye logic
                 if ear < CLOSED_EAR:
                     if eye_closed_start is None:
                         eye_closed_start = now
                     eye_closed_duration = now - eye_closed_start
-
                 elif CLOSED_EAR <= ear < SEMICLOSED_EAR:
-                    # semi-closed / droopy eyes
                     if eye_closed_start is None:
                         eye_closed_start = now
                     eye_closed_duration = now - eye_closed_start
                     if eye_closed_duration >= SEMICLOSED_TIME:
                         semi_closed_detected = True
                 else:
-                    # eyes reopened
                     if eye_closed_start is not None:
                         duration = now - eye_closed_start
                         if duration < BLINK_TIME_MAX:
@@ -330,7 +268,7 @@ def monitor_driver():
                     eye_closed_start = None
                     eye_closed_duration = 0.0
 
-                # ---- Yawn detection ----
+                # Yawn detection
                 mouth_ratio = mouth_open_ratio(face_landmarks.landmark, w, h)
                 if mouth_ratio > MOUTH_OPEN_THRESH:
                     yawns.append(now)
@@ -338,17 +276,15 @@ def monitor_driver():
                 if len(yawns) >= 2:
                     yawned = True
 
-            # ---- State logic ----
+            # State logic
             if len(eye_closure_events) >= 3 or yawned or semi_closed_detected:
                 driver_state = "Drowsy"
-
             else:
                 if driver_state == "Calm":
                     if now - last_blink_time >= NO_BLINK_ALERT_TIME:
                         driver_state = "Alert"
                         alert_buffer_start = now
                         blink_count_buffer = 0
-
                 elif driver_state == "Alert":
                     if blinked:
                         blink_count_buffer += 1
@@ -363,23 +299,20 @@ def monitor_driver():
 
             update_json()
 
-            # ---- Playlist logic ----
+            # Playlist creation
             if not playlist_created and now - monitor_start_time >= 30:
                 sp = get_spotify_client()
                 if sp:
-                    create_smart_playlist_fixed(sp, total_tracks=20)
+                    create_smart_playlist(sp, driver_state, total_tracks=20)
                     playlist_created = True
                     monitoring_active = False
 
-            # ---- Display ----
-            cv2.putText(frame, f"State: {driver_state}", (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-            cv2.putText(frame, f"EAR: {ear:.3f}", (30, 90),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            # Display
+            cv2.putText(frame, f"State: {driver_state}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+            cv2.putText(frame, f"EAR: {ear:.3f}", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             if not playlist_created:
                 time_left = max(0, 30 - (now - monitor_start_time))
-                cv2.putText(frame, f"Playlist in: {time_left:.1f}s", (30, 130),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(frame, f"Playlist in: {time_left:.1f}s", (30, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             cv2.imshow("Driver Monitor", frame)
             if cv2.waitKey(5) & 0xFF == 27:
@@ -388,8 +321,6 @@ def monitor_driver():
 
     cap.release()
     cv2.destroyAllWindows()
-
-
 
 # ---------------- Flask Routes ----------------
 @app.route("/")
@@ -403,7 +334,7 @@ def home():
         <button type="submit">▶ Start Monitoring</button>
     </form>
     <form action="{{ url_for('stop') }}" method="post">
-        <button type="submit">⏹ Stop & Delete Playlist</button>
+        <button type="submit">⏹ Stop Monitoring</button>
     </form>
     {% if playlist_created %}
     <p style="color: green;">✅ Playlist created! Monitoring stopped.</p>
@@ -433,18 +364,11 @@ def start():
 
 @app.route("/stop", methods=["POST"])
 def stop():
-    global monitoring_active, playlist_created, created_playlist_id
-    sp = get_spotify_client()
+    global monitoring_active, playlist_created
     if monitoring_active:
         monitoring_active = False
         if monitoring_thread:
             monitoring_thread.join(timeout=1)
-    if created_playlist_id and sp:
-        try:
-            sp.current_user_unfollow_playlist(created_playlist_id)
-        except Exception:
-            pass
-        created_playlist_id = None
     playlist_created = False
     return redirect(url_for("home"))
 
