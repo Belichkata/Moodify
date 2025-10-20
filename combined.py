@@ -22,8 +22,9 @@ REDIRECT_URI = "http://127.0.0.1:5000/callback"
 SCOPE = (
     "playlist-read-private playlist-modify-private playlist-modify-public "
     "user-read-playback-state user-read-currently-playing user-top-read "
-    "user-library-read user-follow-read"
+    "user-library-read user-follow-read user-modify-playback-state"
 )
+
 
 # ---------------- Flask Setup ----------------
 app = Flask(__name__)
@@ -493,11 +494,38 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
             sp.playlist_add_items(created_playlist_id, chunk)
             print(f"➕ Added {len(chunk)} tracks to playlist chunk ({i}..{i+len(chunk)})")
             time.sleep(0.2)
+
         print(f"✅ Created '{playlist_name}' with {len(unique_uris)} tracks.")
+
+        # ▶️ Automatically start playback after creation
+        start_spotify_playback(sp, created_playlist_id)
+
     except Exception as e:
         print(f"Error adding tracks: {e}")
 
     return created_playlist_id
+
+
+
+def start_spotify_playback(sp, playlist_id):
+    """
+    Starts playback of the given Spotify playlist on the user's active device.
+    """
+    try:
+        # Get list of user devices
+        devices = sp.devices().get("devices", [])
+        if not devices:
+            print("⚠️ No active Spotify devices found. Open Spotify on one of your devices and try again.")
+            return
+        
+        # Use the first active device (you can improve this by picking by name/type)
+        device_id = devices[0]["id"]
+
+        # Start playback
+        sp.start_playback(device_id=device_id, context_uri=f"spotify:playlist:{playlist_id}")
+        print(f"🎶 Now playing your playlist on device: {devices[0]['name']}")
+    except Exception as e:
+        print(f"❌ Could not start playback: {e}")
 
 # ---------------- Driver Monitoring ----------------
 def monitor_driver():
