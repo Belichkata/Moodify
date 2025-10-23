@@ -126,8 +126,8 @@ def get_weather_data():
     """
     Optional weather fetch — set your API key if you want weather-influenced keywords.
     """
-    api_key = "YOUR_OPENWEATHER_API_KEY"  # replace to enable
-    if not api_key or api_key == "YOUR_OPENWEATHER_API_KEY":
+    api_key = "eafc9b5cf57e96256a1b488d7f84b673"  # replace to enable
+    if not api_key or api_key == "eafc9b5cf57e96256a1b488d7f84b673":
         return None
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q=Sofia,BG&appid={api_key}&units=metric"
@@ -140,86 +140,31 @@ def get_weather_data():
         print(f"Weather fetch error: {e}")
         return None
 
-def get_environment_conditions(lux=None, now=None, speed_kmh=None):
+import requests
+
+def get_surroundings_from_coords(lat, lon):
     """
-    Determine environment descriptors based on:
-    - lux (lighting)
-    - time of day
-    - speed (km/h)
-    Returns a dict with time_of_day, light_condition, speed_condition, and mood_keywords
+    Get location details from Geoapify Reverse Geocoding.
+    Returns city, state, country based on coordinates.
     """
-    import datetime as dt
-    if now is None:
-        now = dt.datetime.now()
-    hour = now.hour
-
-    # time of day coarse categories
-    if 5 <= hour < 12:
-        time_of_day = "morning"
-    elif 12 <= hour < 17:
-        time_of_day = "afternoon"
-    elif 17 <= hour < 21:
-        time_of_day = "evening"
-    else:
-        time_of_day = "night"
-
-    # interpret lux
-    if lux is None:
-        lux = 300.0
+    api_key = "96996f00c3bd49f8a1b5b85195480367"  
+    url = f"https://api.geoapify.com/v1/geocode/reverse?lat={lat}&lon={lon}&apiKey={api_key}"
     try:
-        lux_val = float(lux)
-    except Exception:
-        lux_val = 300.0
-
-    if lux_val >= 800:
-        light_condition = "bright"
-    elif lux_val >= 200:
-        light_condition = "dim"
-    else:
-        light_condition = "dark"
-
-    # interpret speed
-    if speed_kmh is None:
-        speed_kmh = 0
-    try:
-        speed_val = float(speed_kmh)
-    except Exception:
-        speed_val = 0
-
-    if speed_val >= 100:
-        speed_condition = "fast"
-    elif speed_val >= 40:
-        speed_condition = "moderate"
-    else:
-        speed_condition = "slow"
-
-    # keywords for lighting
-    if light_condition == "bright":
-        mood_keywords = ["energetic", "upbeat", "bright", "dance"]
-    elif light_condition == "dim":
-        mood_keywords = ["focus", "groove", "midtempo"]
-    else:
-        mood_keywords = ["warm", "cozy", "soft"]
-
-    # slight time-of-day adjustment
-    if time_of_day == "night":
-        mood_keywords += ["chill", "ambient"]
-
-    # add speed-related influence
-    if speed_condition == "fast":
-        mood_keywords += ["high tempo", "intense", "driving", "bass"]
-    elif speed_condition == "moderate":
-        mood_keywords += ["steady", "groovy", "balanced"]
-    else:
-        mood_keywords += ["relaxed", "mellow"]
-
-    return {
-        "time_of_day": time_of_day,
-        "light_condition": light_condition,
-        "speed_condition": speed_condition,
-        "mood_keywords": list(dict.fromkeys(mood_keywords))
-    }
-
+        r = requests.get(url, timeout=6)
+        data = r.json()
+        if "features" in data and data["features"]:
+            props = data["features"][0]["properties"]
+            city = props.get("city") or props.get("town") or props.get("village") or "Unknown"
+            state = props.get("state") or "Unknown"
+            country = props.get("country") or "Unknown"
+            print(f"📍 Location detected: {city}, {state}, {country}")
+            return {"city": city, "state": state, "country": country}
+        else:
+            print("⚠️ No location features found for these coordinates.")
+            return {"city": "Unknown", "state": "Unknown", "country": "Unknown"}
+    except Exception as e:
+        print(f"❌ Error fetching surroundings: {e}")
+        return {"city": "Unknown", "state": "Unknown", "country": "Unknown"}
 
 
 # ---------- Discovery helper placed at module scope ----------
@@ -305,80 +250,231 @@ def get_discovery_tracks(sp, mood, user_genres, max_tracks=400):
     print(f"✅ Using {len(discovery_tracks)} discovery tracks after filtering for {mood}")
     return discovery_tracks
 
-# ---------------- Playlist creation ----------------
+
+def get_traffic_status(lat, lon, current_speed, tomtom_key):
+    """
+    Compare the driver's speed to TomTom traffic data and infer traffic condition.
+    Returns: 'heavy', 'moderate', or 'free' (for traffic level).
+    """
+    url = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/50/json"
+    params = {"point": f"{lat},{lon}", "key": tomtom_key}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            print(f"⚠️ TomTom API error {response.status_code}: {response.text}")
+            return "unknown"
+
+        data = response.json()
+        segment = data.get("flowSegmentData")
+        if not segment:
+            print("❌ No flowSegmentData returned.")
+            return "unknown"
+
+        free_flow = segment.get("freeFlowSpeed", 0)
+        print(f"TomTom free flow speed: {free_flow} km/h | Your speed: {current_speed} km/h")
+
+        # Compare current driving speed with free-flow
+        if current_speed < free_flow * 0.4:
+            print("🚗 Heavy traffic detected.")
+            return "heavy"
+        elif current_speed < free_flow * 0.8:
+            print("🚙 Moderate traffic.")
+            return "moderate"
+        else:
+            print("🏎️ Free-flowing traffic.")
+            return "free"
+    except Exception as e:
+        print(f"❌ Error checking TomTom traffic: {e}")
+        return "unknown"
+
+
+def get_environment_conditions(lux=None, now=None, speed_kmh=None):
+    """
+    Determine environment descriptors based on:
+    - lux (lighting)
+    - time of day
+    - speed (km/h)
+    Returns a dict with time_of_day, light_condition, speed_condition, and mood_keywords
+    """
+    if now is None:
+        now = dt.datetime.now()
+    hour = now.hour
+
+    # Time of day
+    if 5 <= hour < 12:
+        time_of_day = "morning"
+    elif 12 <= hour < 17:
+        time_of_day = "afternoon"
+    elif 17 <= hour < 21:
+        time_of_day = "evening"
+    else:
+        time_of_day = "night"
+
+    # Lighting
+    if lux is None:
+        lux_val = 300.0
+    else:
+        try:
+            lux_val = float(lux)
+        except Exception:
+            lux_val = 300.0
+
+    if lux_val >= 800:
+        light_condition = "bright"
+    elif lux_val >= 200:
+        light_condition = "dim"
+    else:
+        light_condition = "dark"
+
+    # Speed
+    if speed_kmh is None:
+        speed_val = 0
+    else:
+        try:
+            speed_val = float(speed_kmh)
+        except Exception:
+            speed_val = 0
+
+    if speed_val >= 100:
+        speed_condition = "fast"
+    elif speed_val >= 40:
+        speed_condition = "moderate"
+    else:
+        speed_condition = "slow"
+
+    # Mood keywords based on light and speed
+    mood_keywords = []
+    if light_condition == "bright":
+        mood_keywords += ["energetic", "upbeat", "bright"]
+    elif light_condition == "dim":
+        mood_keywords += ["focus", "groove", "midtempo"]
+    else:
+        mood_keywords += ["warm", "cozy", "soft"]
+
+    if speed_condition == "fast":
+        mood_keywords += ["driving", "intense"]
+    elif speed_condition == "moderate":
+        mood_keywords += ["steady", "balanced"]
+    else:
+        mood_keywords += ["relaxed", "mellow"]
+
+    if time_of_day == "night":
+        mood_keywords += ["chill", "ambient"]
+
+    return {
+        "time_of_day": time_of_day,
+        "light_condition": light_condition,
+        "speed_condition": speed_condition,
+        "mood_keywords": list(dict.fromkeys(mood_keywords))
+    }
+
+
+def start_spotify_playback(sp, playlist_id):
+    """
+    Start playback of the specified playlist on the user's active Spotify device.
+    """
+    try:
+        devices = sp.devices()
+        if not devices['devices']:
+            print("⚠️ No active Spotify device found. Open Spotify on one of your devices and try again.")
+            return
+
+        # Pick the first active device
+        device_id = devices['devices'][0]['id']
+
+        # Start playback
+        sp.start_playback(device_id=device_id, context_uri=f"spotify:playlist:{playlist_id}")
+        print("🎧 Playback started on your active Spotify device.")
+    except Exception as e:
+        print(f"❌ Could not start playback: {e}")
+
+
 def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
     """
-    Creates a playlist according to global driver_state. Uses weather and
-    environment (lux/time) to augment keywords. env_lux is optional (simulate a light sensor).
-    Returns created playlist id or None.
+    Creates a playlist based on driver mood, weather, lighting, speed, and surroundings.
+    Automatically plays the playlist and deletes the old one if it exists.
     """
     global created_playlist_id, playlist_created, driver_state
 
-    state = driver_state  # local alias
-    mood_params = MOOD_PARAMS.get(state, {"description": ""})
-    # ---- Ask user for simulated lux input ----
+    # ---------------- Ask for user inputs ----------------
     try:
         lux_input = float(input("💡 Enter ambient lux value (e.g., 50=dark, 300=dim, 1000=bright): "))
     except Exception:
-        lux_input = None
+        lux_input = 300.0
 
-# ---- Get environment conditions ----
-    env = get_environment_conditions(lux_input)
-    print(f"🌤️ Environment detected: {env['time_of_day']} | {env['light_condition']} | Lux={lux_input}")
-
-    # ---- Ask user for simulated driving speed ----
     try:
         speed_input = float(input("🚗 Enter simulated driving speed (km/h): "))
     except Exception:
         speed_input = 0
 
-# ---- Get environment conditions ----
+    try:
+        lat = float(input("🌍 Enter your latitude: "))
+        lon = float(input("🌍 Enter your longitude: "))
+    except Exception:
+        lat, lon = 42.6977, 23.3219  # default: Sofia
+
+
+    # --- Get live traffic condition ---
+    TOMTOM_KEY = "9M7YdaLFAFD06NgSt1Vxwp5ROzZt0dBS"  # <-- Replace with your key
+    traffic_status = get_traffic_status(lat, lon, speed_input, TOMTOM_KEY)
+
+# Adjust mood weighting if in traffic
+    if traffic_status == "heavy":
+        print("🧘 Heavy traffic → shifting toward relaxing and calm tracks.")
+        state = "calm"
+    elif traffic_status == "moderate" and state == "alert":
+        print("🚦 Moderate traffic → blending alert with calm tracks.")
+        state = "neutral"
+
+    # ---------------- Get environment and surroundings ----------------
     env = get_environment_conditions(lux_input, speed_kmh=speed_input)
-    print(f"🌤️ Environment detected: {env['time_of_day']} | {env['light_condition']} | {env['speed_condition']} | Lux={lux_input} | Speed={speed_input} km/h")
+    surroundings = get_surroundings_from_coords(lat, lon)
+    print(f"🌤️ Environment: {env['time_of_day']} | {env['light_condition']} | {env['speed_condition']}")
+    print(f"📍 Surroundings: {surroundings['city']}, {surroundings['country']}")
 
+    # ---------------- Handle existing playlist ----------------
+    if created_playlist_id:
+        try:
+            sp.current_user_unfollow_playlist(created_playlist_id)
+            print(f"🗑️ Deleted old playlist {created_playlist_id}")
+        except Exception as e:
+            print(f"⚠️ Could not delete old playlist: {e}")
+        created_playlist_id = None
 
+    # ---------------- Create new playlist ----------------
+    state = driver_state
+    mood_params = MOOD_PARAMS.get(state, {"description": ""})
     playlist_name = f"Drive Mood – {state} Mode – {int(time.time())}"
 
-    # create playlist shell
     try:
         user_id = sp.current_user()["id"]
         playlist = sp.user_playlist_create(
             user=user_id, name=playlist_name, public=False, description=mood_params["description"]
         )
         created_playlist_id = playlist["id"]
-        print(f"🎶 Created playlist shell: {playlist_name} ({created_playlist_id})")
+        print(f"🎶 Created playlist: {playlist_name}")
     except Exception as e:
-        print(f"Error creating playlist: {e}")
+        print(f"❌ Error creating playlist: {e}")
         return None
 
-    # fetch user's top tracks & artists
+    # ---------------- Get user’s top data ----------------
     try:
         top_tracks_full = sp.current_user_top_tracks(limit=50, time_range="medium_term")["items"]
-        top_tracks = [t for t in top_tracks_full if t and t.get("uri")]
-    except Exception as e:
-        print(f"Error fetching top tracks: {e}")
-        top_tracks_full, top_tracks = [], []
-
-    try:
         top_artists_full = sp.current_user_top_artists(limit=20, time_range="medium_term")["items"]
-        top_artists = [a["id"] for a in top_artists_full if a.get("id")]
-    except Exception as e:
-        top_artists_full, top_artists = [], []
-
-    print(f"Found {len(top_tracks)} top tracks, {len(top_artists)} top artists")
-
-    # gather user genres
-    user_genres = set()
-    try:
-        for artist in top_artists_full:
-            for g in artist.get("genres", []):
-                user_genres.add(g.lower())
-        user_genres = list(user_genres)
     except Exception:
-        user_genres = []
+        top_tracks_full, top_artists_full = [], []
 
-    # weather keywords (optional)
-    weather = get_weather_data()  # returns None or dict
+    top_tracks = [t for t in top_tracks_full if t.get("uri")]
+    top_artists = [a["id"] for a in top_artists_full if a.get("id")]
+
+    user_genres = []
+    for artist in top_artists_full:
+        user_genres += [g.lower() for g in artist.get("genres", [])]
+    user_genres = list(set(user_genres))
+
+    # ---------------- Weather + Environment Influence ----------------
+    weather = get_weather_data() or {}
     weather_keywords = []
     if weather:
         t = weather.get("temp")
@@ -390,142 +486,65 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
         else:
             weather_keywords = ["upbeat", "positive", "chill"]
 
-    # environment (lux/time) keywords
-    env = get_environment_conditions(lux=env_lux)
-    env_keywords = env.get("mood_keywords", [])
+    surroundings_keywords = []
+    if surroundings["country"].lower() in ["greece", "spain", "italy"]:
+        surroundings_keywords = ["mediterranean", "sunny", "vibrant"]
+    elif surroundings["country"].lower() in ["norway", "sweden", "finland"]:
+        surroundings_keywords = ["nordic", "ambient", "chill"]
+    elif surroundings["city"].lower() in ["sofia", "paris", "berlin"]:
+        surroundings_keywords = ["urban", "modern", "city vibe"]
 
-    # base mood keywords from your SEARCH_KEYWORDS
+    # ---------------- Build keyword blend ----------------
     base_keywords = SEARCH_KEYWORDS.get(state, [])
+    env_keywords = env.get("mood_keywords", [])
+    final_keywords = list(dict.fromkeys(base_keywords + env_keywords + weather_keywords + surroundings_keywords))
+    print(f"🔎 Using keywords: {final_keywords[:10]}")
 
-    # context-based adjustment to bias for energy/valence where necessary
-    context_keywords = []
-    if state == "Alert":
-        if env["light_condition"] == "bright":
-            context_keywords += ["energetic", "dance", "rock", "upbeat", "power"]
-        else:
-            context_keywords += ["focus", "trap", "groove", "bass"]
-    elif state == "Drowsy":
-        if env["light_condition"] == "bright":
-            context_keywords += ["lively", "positive", "pop", "funk"]
-        else:
-            context_keywords += ["uplifting", "warm", "soulful"]
-    else:  # Calm
-        context_keywords += ["chill", "acoustic", "lofi", "mellow"]
-
-    # final keyword blend, deduped and limited
-    keywords = list(dict.fromkeys(SEARCH_KEYWORDS.get(state, []) + env["mood_keywords"] + weather_keywords))
-    print(f"🔎 Using keywords: {keywords[:10]}")
-
-
-    # discovery (use your get_discovery_tracks function above)
+    # ---------------- Fetch discovery & recommendations ----------------
     discovery_tracks_full = get_discovery_tracks(sp, state, user_genres, max_tracks=int(total_tracks * 1.5))
-    print(f"🎧 Found {len(discovery_tracks_full)} genre-matched discovery tracks for {state}")
-
-    # recommendations (seed from user's top tracks/artists)
     rec_tracks_full = []
     try:
         seed_tracks = [t.get("id") for t in top_tracks_full[:5] if t.get("id")]
         seed_artists = list(dict.fromkeys(top_artists))[:5]
-        if seed_tracks or seed_artists:
-            rec_kwargs = {"limit": min(40, total_tracks)}
-            if seed_tracks:
-                rec_kwargs["seed_tracks"] = seed_tracks[:3]
-            if seed_artists:
-                rec_kwargs["seed_artists"] = seed_artists[:2]
-            rec_resp = sp.recommendations(**rec_kwargs)
-            rec_tracks_full = rec_resp.get("tracks", []) if rec_resp else []
-            print(f"✅ Got {len(rec_tracks_full)} recommendations for {state}.")
-        else:
-            print("⚠️ Not enough seeds for recommendations, skipping recs.")
-    except Exception as e:
-        print(f"Error fetching recommendations: {e}")
-        rec_tracks_full = []
+        rec_resp = sp.recommendations(seed_tracks=seed_tracks[:3], seed_artists=seed_artists[:2], limit=25)
+        rec_tracks_full = rec_resp.get("tracks", []) if rec_resp else []
+    except Exception:
+        pass
 
-    # combine weighted and shuffle
+    # ---------------- Combine & Deduplicate ----------------
     random.shuffle(discovery_tracks_full)
     random.shuffle(top_tracks)
     random.shuffle(rec_tracks_full)
 
-    num_discovery = int(total_tracks * 0.7)
-    num_top = int(total_tracks * 0.15)
-    num_rec = total_tracks - num_discovery - num_top
+    combined = discovery_tracks_full[:int(total_tracks * 0.7)] + \
+               top_tracks[:int(total_tracks * 0.15)] + \
+               rec_tracks_full[:int(total_tracks * 0.15)]
+    random.shuffle(combined)
 
-    combined = discovery_tracks_full[:num_discovery] + top_tracks[:num_top] + rec_tracks_full[:num_rec]
-    random.shuffle(combined)  # mix them up so they are not in blocks
-
-    # dedupe & collect URIs
-    seen, unique_uris = set(), []
-    for track in combined:
-        if not track:
-            continue
-        name = (track.get("name") or "").lower().strip()
-        artist = (track["artists"][0]["name"] if track.get("artists") else "").lower().strip()
+    seen, uris = set(), []
+    for t in combined:
+        if not t: continue
+        name = (t.get("name") or "").lower().strip()
+        artist = (t["artists"][0]["name"] if t.get("artists") else "").lower().strip()
         key = f"{name}-{artist}"
-        uri = track.get("uri")
-        if key and uri and key not in seen:
+        if key not in seen and t.get("uri"):
             seen.add(key)
-            unique_uris.append(uri)
-        if len(unique_uris) >= total_tracks:
-            break
+            uris.append(t["uri"])
+        if len(uris) >= total_tracks: break
 
-    # filler fallback
-    if len(unique_uris) < total_tracks:
-        filler = discovery_tracks_full + rec_tracks_full + top_tracks
-        for t in filler:
-            if not t or not t.get("uri"):
-                continue
-            name = (t.get("name") or "").lower().strip()
-            artist = (t["artists"][0]["name"] if t.get("artists") else "").lower().strip()
-            key = f"{name}-{artist}"
-            if key not in seen:
-                seen.add(key)
-                unique_uris.append(t["uri"])
-            if len(unique_uris) >= total_tracks:
-                break
-
-    if not unique_uris:
-        print("⚠️ No valid tracks found to add.")
-        return created_playlist_id
-
-    # add to playlist (chunks)
+    # ---------------- Add tracks & start playback ----------------
     try:
-        for i in range(0, len(unique_uris), 100):
-            chunk = unique_uris[i:i + 100]
-            sp.playlist_add_items(created_playlist_id, chunk)
-            print(f"➕ Added {len(chunk)} tracks to playlist chunk ({i}..{i+len(chunk)})")
+        for i in range(0, len(uris), 100):
+            sp.playlist_add_items(created_playlist_id, uris[i:i+100])
             time.sleep(0.2)
-
-        print(f"✅ Created '{playlist_name}' with {len(unique_uris)} tracks.")
-
-        # ▶️ Automatically start playback after creation
+        print(f"✅ Added {len(uris)} tracks to '{playlist_name}'")
         start_spotify_playback(sp, created_playlist_id)
-
     except Exception as e:
-        print(f"Error adding tracks: {e}")
+        print(f"❌ Error adding tracks: {e}")
 
+    playlist_created = True
     return created_playlist_id
 
-
-
-def start_spotify_playback(sp, playlist_id):
-    """
-    Starts playback of the given Spotify playlist on the user's active device.
-    """
-    try:
-        # Get list of user devices
-        devices = sp.devices().get("devices", [])
-        if not devices:
-            print("⚠️ No active Spotify devices found. Open Spotify on one of your devices and try again.")
-            return
-        
-        # Use the first active device (you can improve this by picking by name/type)
-        device_id = devices[0]["id"]
-
-        # Start playback
-        sp.start_playback(device_id=device_id, context_uri=f"spotify:playlist:{playlist_id}")
-        print(f"🎶 Now playing your playlist on device: {devices[0]['name']}")
-    except Exception as e:
-        print(f"❌ Could not start playback: {e}")
 
 # ---------------- Driver Monitoring ----------------
 def monitor_driver():
