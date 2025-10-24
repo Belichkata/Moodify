@@ -251,13 +251,21 @@ def get_discovery_tracks(sp, mood, user_genres, max_tracks=400):
     return discovery_tracks
 
 
+import requests
+
 def get_traffic_status(lat, lon, current_speed, tomtom_key):
     """
-    Compare the driver's speed to TomTom traffic data and infer traffic condition.
-    Returns: 'heavy', 'moderate', or 'free' (for traffic level).
+    Compare driver speed to TomTom traffic data and infer traffic condition.
+    Returns: 'heavy', 'moderate', or 'free'.
     """
-    url = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/50/json"
-    params = {"point": f"{lat},{lon}", "key": tomtom_key}
+
+    # Recommended zoom: 10–22 (higher zoom = smaller area)
+    url = f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
+    params = {
+        "point": f"{lat},{lon}",
+        "unit": "KMPH",
+        "key": tomtom_key
+    }
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -272,7 +280,8 @@ def get_traffic_status(lat, lon, current_speed, tomtom_key):
             return "unknown"
 
         free_flow = segment.get("freeFlowSpeed", 0)
-        print(f"TomTom free flow speed: {free_flow} km/h | Your speed: {current_speed} km/h")
+        current_flow = segment.get("currentSpeed", 0)
+        print(f"TomTom free flow speed: {free_flow} km/h | Current traffic speed: {current_flow} km/h | Your speed: {current_speed} km/h")
 
         # Compare current driving speed with free-flow
         if current_speed < free_flow * 0.4:
@@ -396,6 +405,7 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
     Automatically plays the playlist and deletes the old one if it exists.
     """
     global created_playlist_id, playlist_created, driver_state
+    state = driver_state  
 
     # ---------------- Ask for user inputs ----------------
     try:
