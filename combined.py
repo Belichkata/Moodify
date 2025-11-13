@@ -74,10 +74,12 @@ MOOD_GENRES = {
 }
 
 SEARCH_KEYWORDS = {
-    "Calm": ["chill k-pop", "melodic rap chill", "soft k-rap", "relaxing k-pop", "ambient noise", "mellow melodic rap"],
-    "Alert": ["k-pop hype", "k-rap energy", "rap workout", "fast k-pop"],
-    "Drowsy": ["upbeat k-pop", "dance k-pop", "catchy melodic rap", "rap bangers", "noise music upbeat"],
+    "Wakefulness": ["chill k-pop", "melodic rap chill", "soft k-rap", "relaxing k-pop", "ambient noise", "mellow melodic rap"],
+    "Hypovigilance": ["k-pop hype", "k-rap energy", "rap workout", "fast k-pop"],
+    "Drowsiness": ["upbeat k-pop", "dance k-pop", "catchy melodic rap", "rap bangers", "noise music upbeat"],
+    "Microsleep": ["hard rock", "drum and bass", "intense k-pop", "metal", "edm banger"]
 }
+
 
 # ---------------- Helper Functions ----------------
 def euclidean_distance(p1, p2):
@@ -562,10 +564,11 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
         surroundings_keywords = ["urban", "modern", "city vibe"]
 
     # ---------------- Build keyword blend ----------------
-    base_keywords = SEARCH_KEYWORDS.get(state, [])
-    env_keywords = env.get("mood_keywords", [])
-    final_keywords = list(dict.fromkeys(base_keywords + env_keywords + weather_keywords + surroundings_keywords))
-    print(f"🔎 Using keywords: {final_keywords[:10]}")
+  # --- use your own mapping instead of a default one ---
+    keywords = SEARCH_KEYWORDS.get(driver_state, ["k-pop", "k-rap"])
+
+    print(f"🔎 Using keywords: {keywords}")
+
 
     # ---------------- Fetch discovery & recommendations ----------------
     discovery_tracks_full = get_discovery_tracks(sp, state, user_genres, max_tracks=int(total_tracks * 1.5))
