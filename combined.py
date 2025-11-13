@@ -5,8 +5,10 @@ import time
 import cv2
 import mediapipe as mp
 import math
+import numpy as np
 import random
 import requests
+from collections import deque
 from datetime import datetime 
 import datetime as dt
 from flask import Flask, session, redirect, url_for, request, render_template_string
@@ -140,31 +142,59 @@ def get_weather_data():
         print(f"Weather fetch error: {e}")
         return None
 
-import requests
 
 def get_surroundings_from_coords(lat, lon):
     """
-    Get location details from Geoapify Reverse Geocoding.
-    Returns city, state, country based on coordinates.
+    Get detailed surroundings (city, country, landscape, nearby water, etc.)
+    using Geoapify reverse geocoding + places API.
     """
-    api_key = "96996f00c3bd49f8a1b5b85195480367"  
-    url = f"https://api.geoapify.com/v1/geocode/reverse?lat={lat}&lon={lon}&apiKey={api_key}"
+    api_key = "96996f00c3bd49f8a1b5b85195480367"
+    base_url = "https://api.geoapify.com/v1/geocode/reverse"
+    places_url = "https://api.geoapify.com/v2/places"
+
+    surroundings = {"city": "Unknown", "state": "Unknown", "country": "Unknown", "features": []}
+
     try:
+        # --- Reverse geocode for admin info
+        url = f"{base_url}?lat={lat}&lon={lon}&apiKey={api_key}"
         r = requests.get(url, timeout=6)
         data = r.json()
+
         if "features" in data and data["features"]:
             props = data["features"][0]["properties"]
-            city = props.get("city") or props.get("town") or props.get("village") or "Unknown"
-            state = props.get("state") or "Unknown"
-            country = props.get("country") or "Unknown"
-            print(f"📍 Location detected: {city}, {state}, {country}")
-            return {"city": city, "state": state, "country": country}
-        else:
-            print("⚠️ No location features found for these coordinates.")
-            return {"city": "Unknown", "state": "Unknown", "country": "Unknown"}
+            surroundings["city"] = props.get("city") or props.get("town") or props.get("village") or "Unknown"
+            surroundings["state"] = props.get("state") or "Unknown"
+            surroundings["country"] = props.get("country") or "Unknown"
+            surroundings["road"] = props.get("road") or props.get("street") or None
+            surroundings["natural"] = props.get("natural")
+            surroundings["water"] = props.get("water")
+
+        # --- Search nearby for landscape features (within ~1km)
+        radius_m = 1000
+        categories = "natural.beach,natural.water,poi.park,natural.mountain"
+        places_params = {
+            "categories": categories,
+            "filter": f"circle:{lon},{lat},{radius_m}",
+            "limit": 5,
+            "apiKey": api_key,
+        }
+        rp = requests.get(places_url, params=places_params, timeout=6)
+        pd = rp.json()
+
+        if "features" in pd:
+            for f in pd["features"]:
+                cat = f["properties"].get("categories", [])
+                name = f["properties"].get("name") or f["properties"].get("formatted", "")
+                if cat:
+                    surroundings["features"].append({"name": name, "category": cat})
+
+        print(f"📍 Detected: {surroundings}")
+        return surroundings
+
     except Exception as e:
         print(f"❌ Error fetching surroundings: {e}")
-        return {"city": "Unknown", "state": "Unknown", "country": "Unknown"}
+        return surroundings
+
 
 
 # ---------- Discovery helper placed at module scope ----------
@@ -197,7 +227,6 @@ def get_discovery_tracks(sp, mood, user_genres, max_tracks=400):
                 if len(all_tracks) >= max_tracks * 2:
                     break
             except Exception as e:
-                # ignore single-playlist failures
                 continue
         if len(all_tracks) >= max_tracks * 2:
             break
@@ -217,7 +246,6 @@ def get_discovery_tracks(sp, mood, user_genres, max_tracks=400):
             for artist in res:
                 artist_cache[artist["id"]] = [g.lower() for g in artist.get("genres", [])]
         except Exception as e:
-            # if artists endpoint fails for a batch, skip it
             print(f"⚠️ Genre batch fetch failed ({i // 50}): {e}")
 
     # fuzzy match helper
@@ -242,7 +270,7 @@ def get_discovery_tracks(sp, mood, user_genres, max_tracks=400):
         except Exception:
             continue
 
-    # fallback: if nothing matched, pick random from candidates (so playlist won't be empty)
+    # fallback: if nothing matched, pick random from candidates
     if not discovery_tracks:
         take = min(len(all_tracks), max_tracks)
         discovery_tracks = random.sample(all_tracks, take)
@@ -251,7 +279,6 @@ def get_discovery_tracks(sp, mood, user_genres, max_tracks=400):
     return discovery_tracks
 
 
-import requests
 
 def get_traffic_status(lat, lon, current_speed, tomtom_key):
     """
@@ -378,25 +405,55 @@ def get_environment_conditions(lux=None, now=None, speed_kmh=None):
         "mood_keywords": list(dict.fromkeys(mood_keywords))
     }
 
-
 def start_spotify_playback(sp, playlist_id):
     """
-    Start playback of the specified playlist on the user's active Spotify device.
+    Start playback of the specified playlist on your best available Spotify device.
+    Forces playback transfer if Spotify is idle.
     """
     try:
-        devices = sp.devices()
-        if not devices['devices']:
-            print("⚠️ No active Spotify device found. Open Spotify on one of your devices and try again.")
+        devices_info = sp.devices()
+        devices = devices_info.get("devices", [])
+
+        if not devices:
+            print("⚠️ No available Spotify devices. Open Spotify on your computer or phone and play a song once.")
             return
 
-        # Pick the first active device
-        device_id = devices['devices'][0]['id']
+        # --- Prefer computer or active device ---
+        device_id = None
+        computer_devices = [d for d in devices if d.get("type", "").lower() == "computer"]
+        active_devices = [d for d in devices if d.get("is_active")]
+        fallback_device = devices[0]["id"]
 
-        # Start playback
+        if computer_devices:
+            device_id = computer_devices[0]["id"]
+            print(f"💻 Selected computer device: {computer_devices[0]['name']}")
+        elif active_devices:
+            device_id = active_devices[0]["id"]
+            print(f"📱 Selected active device: {active_devices[0]['name']}")
+        else:
+            device_id = fallback_device
+            print(f"ℹ️ Using fallback device: {devices[0]['name']}")
+
+        # --- Transfer playback first (this wakes idle Spotify) ---
+        sp.transfer_playback(device_id=device_id, force_play=False)
+        time.sleep(1)
+
+        # --- Start playback ---
+        print(f"🎧 Attempting to play playlist on device ID: {device_id}")
         sp.start_playback(device_id=device_id, context_uri=f"spotify:playlist:{playlist_id}")
-        print("🎧 Playback started on your active Spotify device.")
+        time.sleep(2)
+
+        # --- Verify playback started ---
+        playback = sp.current_playback()
+        if playback and playback.get("is_playing"):
+            print("✅ Playback successfully started!")
+        else:
+            print("⚠️ Playback command sent but Spotify is idle. Try pressing play once manually in the app.")
+
     except Exception as e:
         print(f"❌ Could not start playback: {e}")
+
+
 
 
 def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
@@ -561,21 +618,25 @@ def monitor_driver():
     global driver_state, playlist_created, monitoring_active, created_playlist_id
 
     cap = cv2.VideoCapture(0)
-    driver_state = "Calm"
-    eye_closure_events, yawns = [], []
-    alert_buffer_start, blink_count_buffer = None, 0
-    eye_closed_start, eye_closed_duration = None, 0.0
-    monitor_start_time, last_blink_time = time.time(), time.time()
+    driver_state = "Wakefulness"
+    monitoring_duration = 30  # seconds before evaluating state
+    start_time = time.time()
+    blink_timestamps = []
+    blink_durations = []
+    yawn_timestamps = []
 
-    BLINK_TIME_MAX = 0.5
-    DROWSY_EYE_TIME = 5.0
-    SEMICLOSED_TIME = 3.0
-    NO_BLINK_ALERT_TIME = 8.0
-    SEMICLOSED_EAR = 0.22
-    CLOSED_EAR = 0.18
+    # Blink detection constants
+    EAR_THRESHOLD = 0.21
+    CONSEC_FRAMES = 2
+    ear_below_thresh_frames = 0
+    blink_start_time = None
 
-    with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
-                               min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh:
+    with mp_face_mesh.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as face_mesh:
 
         while monitoring_active and cap.isOpened():
             ret, frame = cap.read()
@@ -586,9 +647,6 @@ def monitor_driver():
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb)
             now = time.time()
-            blinked = False
-            yawned = False
-            semi_closed_detected = False
             ear = 0.0
 
             if results.multi_face_landmarks:
@@ -597,73 +655,79 @@ def monitor_driver():
                 right_ear = eye_aspect_ratio(landmarks.landmark, RIGHT_EYE, w, h)
                 ear = (left_ear + right_ear) / 2.0
 
-                if ear < CLOSED_EAR:
-                    if eye_closed_start is None:
-                        eye_closed_start = now
-                    eye_closed_duration = now - eye_closed_start
-                elif CLOSED_EAR <= ear < SEMICLOSED_EAR:
-                    if eye_closed_start is None:
-                        eye_closed_start = now
-                    eye_closed_duration = now - eye_closed_start
-                    if eye_closed_duration >= SEMICLOSED_TIME:
-                        semi_closed_detected = True
+                # 👁️ Blink detection with duration tracking
+                if ear < EAR_THRESHOLD:
+                    if blink_start_time is None:
+                        blink_start_time = now  # start timing the blink
+                    ear_below_thresh_frames += 1
                 else:
-                    if eye_closed_start is not None:
-                        duration = now - eye_closed_start
-                        if duration < BLINK_TIME_MAX:
-                            blinked = True
-                            last_blink_time = now
-                        elif duration >= DROWSY_EYE_TIME:
-                            if not eye_closure_events or now - eye_closure_events[-1] > DROWSY_EYE_TIME:
-                                eye_closure_events.append(now)
-                                eye_closure_events = eye_closure_events[-3:]
-                    eye_closed_start = None
-                    eye_closed_duration = 0.0
+                    if ear_below_thresh_frames >= CONSEC_FRAMES and blink_start_time is not None:
+                        blink_end_time = now
+                        duration = blink_end_time - blink_start_time
+                        blink_durations.append(duration)
+                        blink_timestamps.append(blink_end_time)
+                    ear_below_thresh_frames = 0
+                    blink_start_time = None
 
+                # 😮 Detect yawn
                 mouth_ratio = mouth_open_ratio(landmarks.landmark, w, h)
                 if mouth_ratio > MOUTH_OPEN_THRESH:
-                    yawns.append(now)
-                yawns = [y for y in yawns if now - y < 15]
-                if len(yawns) >= 2:
-                    yawned = True
+                    yawn_timestamps.append(now)
 
-            # determine driver state
-            if len(eye_closure_events) >= 3 or yawned or semi_closed_detected:
-                driver_state = "Drowsy"
-            else:
-                if driver_state == "Calm" and now - last_blink_time >= NO_BLINK_ALERT_TIME:
-                    driver_state = "Alert"
-                    alert_buffer_start = now
-                    blink_count_buffer = 0
-                elif driver_state == "Alert":
-                    if blinked:
-                        blink_count_buffer += 1
-                    if alert_buffer_start is None:
-                        alert_buffer_start = now
-                    elif now - alert_buffer_start >= 5:
-                        if blink_count_buffer >= 2:
-                            driver_state = "Calm"
-                            last_blink_time = now
-                        alert_buffer_start = now
-                        blink_count_buffer = 0
+            # keep only last 60s data
+            blink_timestamps = [t for t in blink_timestamps if now - t <= 60]
+            blink_durations = [d for d in blink_durations if d <= 3.0]  # ignore false long durations
+            yawn_timestamps = [t for t in yawn_timestamps if now - t <= 60]
 
-            update_json()
+            elapsed = now - start_time
+            if elapsed >= monitoring_duration:
+                # only blinks within the last window
+                window_start = now - monitoring_duration
+                window_blinks = [t for t in blink_timestamps if t >= window_start]
+                window_durations = blink_durations[-len(window_blinks):] if window_blinks else []
 
-            # Create playlist and stop monitoring
-            if not playlist_created and now - monitor_start_time >= 30:
-                sp = get_spotify_client()
-                if sp:
-                    create_smart_playlist_fixed(sp, total_tracks=40)
-                    playlist_created = True
-                    monitoring_active = False
-                    print("✅ Playlist created — monitoring stopped.")
-                    break
+                # 🧮 Calculate blink frequency and avg duration
+                blink_freq = (len(window_blinks) / monitoring_duration) * 60.0
+                avg_blink_duration = np.mean(window_durations) if window_durations else 0
 
-            cv2.putText(frame, f"State: {driver_state}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,0,255), 3)
-            cv2.putText(frame, f"EAR: {ear:.3f}", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-            if not playlist_created:
-                time_left = max(0, 30 - (now - monitor_start_time))
-                cv2.putText(frame, f"Playlist in: {time_left:.1f}s", (30,130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+                print(f"🧠 Blinks in {monitoring_duration:.0f}s: {len(window_blinks)}")
+                print(f"🧮 Blink frequency: {blink_freq:.1f} per minute")
+                print(f"⏱️ Avg blink duration: {avg_blink_duration:.2f} sec")
+
+                # ✅ Combine frequency + duration for state evaluation
+                if blink_freq < 20 and avg_blink_duration < 0.25:
+                    driver_state = "Wakefulness"
+                elif 20 <= blink_freq < 30 or 0.25 <= avg_blink_duration < 0.35:
+                    driver_state = "Hypovigilance"
+                elif 30 <= blink_freq < 40 or 0.35 <= avg_blink_duration < 0.5 or len(yawn_timestamps) >= 2:
+                    driver_state = "Drowsiness"
+                else:
+                    if avg_blink_duration >= 1.5 or len(yawn_timestamps) >= 3:
+                        driver_state = "Microsleep"
+
+                update_json()
+                print(f"🟢 Evaluated state: {driver_state}")
+
+                # create playlist once after evaluation
+                if not playlist_created:
+                    sp = get_spotify_client()
+                    if sp:
+                        create_smart_playlist_fixed(sp, total_tracks=40)
+                        playlist_created = True
+                        monitoring_active = False
+                        print("✅ Playlist created — monitoring stopped.")
+                        break
+
+                start_time = now  # reset timer
+
+            # UI
+            cv2.putText(frame, f"State: {driver_state}", (30, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+            cv2.putText(frame, f"EAR: {ear:.3f}", (30, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            time_left = max(0, monitoring_duration - (now - start_time))
+            cv2.putText(frame, f"Next eval: {time_left:.1f}s", (30, 130),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             cv2.imshow("Driver Monitor", frame)
             if cv2.waitKey(5) & 0xFF == 27:
@@ -672,6 +736,7 @@ def monitor_driver():
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 # ---------------- Flask Routes ----------------
 @app.route("/")
@@ -709,18 +774,25 @@ def start():
         return redirect(sp_oauth.get_authorize_url())
     if not monitoring_active:
         monitoring_active = True
-        monitoring_thread = threading.Thread(target=monitor_driver)
+        # ✅ Use lambda so no unwanted args get passed to monitor_driver()
+        monitoring_thread = threading.Thread(target=lambda: monitor_driver())
         monitoring_thread.start()
     return redirect(url_for("home"))
 
+
 @app.route("/stop", methods=["POST"])
 def stop():
-    global monitoring_active, playlist_created, created_playlist_id
+    global monitoring_active, playlist_created, created_playlist_id, monitoring_thread
+
     sp = get_spotify_client()
     if monitoring_active:
         monitoring_active = False
         if monitoring_thread:
-            monitoring_thread.join(timeout=1)
+            stop_event.set()  # signal monitor_driver() loop to stop
+            monitoring_thread.join(timeout=2)
+            print("🛑 Monitoring thread stopped.")
+
+    # Delete playlist if it exists
     if created_playlist_id and sp:
         try:
             sp.current_user_unfollow_playlist(created_playlist_id)
@@ -728,6 +800,7 @@ def stop():
         except Exception as e:
             print(f"Error deleting playlist: {e}")
         created_playlist_id = None
+
     playlist_created = False
     return redirect(url_for("home"))
 
