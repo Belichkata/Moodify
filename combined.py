@@ -565,9 +565,17 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
 
     # ---------------- Build keyword blend ----------------
   # --- use your own mapping instead of a default one ---
-    keywords = SEARCH_KEYWORDS.get(driver_state, ["k-pop", "k-rap"])
+      # ---------------- Build keyword blend ----------------
+    base_keywords = SEARCH_KEYWORDS.get(state, [])
+    env_keywords = env.get("mood_keywords", [])
+    final_keywords = list(dict.fromkeys(base_keywords + env_keywords + weather_keywords + surroundings_keywords))
 
-    print(f"🔎 Using keywords: {keywords}")
+    # fall back if nothing (shouldn't happen)
+    if not final_keywords:
+        final_keywords = ["k-pop", "k-rap"]
+
+    print(f"🔎 Using keywords: {final_keywords[:12]}")
+
 
 
     # ---------------- Fetch discovery & recommendations ----------------
@@ -630,9 +638,8 @@ def monitor_driver():
 
     # Blink detection constants
     EAR_THRESHOLD = 0.21
-    CONSEC_FRAMES = 2
-    ear_below_thresh_frames = 0
-    blink_start_time = None
+    MIN_BLINK_DURATION = 0.05
+    MAX_BLINK_DURATION = 1.0
 
     with mp_face_mesh.FaceMesh(
         max_num_faces=1,
@@ -640,6 +647,10 @@ def monitor_driver():
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     ) as face_mesh:
+
+        blink_start_time = None
+        ear_below_thresh_frames = 0
+        CONSEC_FRAMES = 2  # require at least consecutive frames below threshold to count
 
         while monitoring_active and cap.isOpened():
             ret, frame = cap.read()
@@ -658,60 +669,70 @@ def monitor_driver():
                 right_ear = eye_aspect_ratio(landmarks.landmark, RIGHT_EYE, w, h)
                 ear = (left_ear + right_ear) / 2.0
 
-                # 👁️ Blink detection with duration tracking
+                # Blink start/end tracking (avoid counting per-frame)
                 if ear < EAR_THRESHOLD:
                     if blink_start_time is None:
-                        blink_start_time = now  # start timing the blink
+                        blink_start_time = now
                     ear_below_thresh_frames += 1
                 else:
-                    if ear_below_thresh_frames >= CONSEC_FRAMES and blink_start_time is not None:
-                        blink_end_time = now
-                        duration = blink_end_time - blink_start_time
-                        blink_durations.append(duration)
-                        blink_timestamps.append(blink_end_time)
-                    ear_below_thresh_frames = 0
+                    if blink_start_time is not None and ear_below_thresh_frames >= CONSEC_FRAMES:
+                        duration = now - blink_start_time
+                        # sanity-check duration to avoid false positives
+                        if MIN_BLINK_DURATION <= duration <= MAX_BLINK_DURATION:
+                            blink_durations.append(duration)
+                            blink_timestamps.append(now)
+                    # reset blink trackers
                     blink_start_time = None
+                    ear_below_thresh_frames = 0
 
-                # 😮 Detect yawn
+                # Yawn detection
                 mouth_ratio = mouth_open_ratio(landmarks.landmark, w, h)
                 if mouth_ratio > MOUTH_OPEN_THRESH:
+                    # record yawn moment, will be pruned later
                     yawn_timestamps.append(now)
 
-            # keep only last 60s data
+            # keep only last 60s data for smoothing & windowing
             blink_timestamps = [t for t in blink_timestamps if now - t <= 60]
-            blink_durations = [d for d in blink_durations if d <= 3.0]  # ignore false long durations
+            # keep durations associated with recent blinks (approx)
+            # We don't have per-blink timestamps for durations, so keep last N reasonable durations
+            blink_durations = [d for d in blink_durations if MIN_BLINK_DURATION <= d <= 3.0]
             yawn_timestamps = [t for t in yawn_timestamps if now - t <= 60]
 
             elapsed = now - start_time
             if elapsed >= monitoring_duration:
-                # only blinks within the last window
                 window_start = now - monitoring_duration
                 window_blinks = [t for t in blink_timestamps if t >= window_start]
-                window_durations = blink_durations[-len(window_blinks):] if window_blinks else []
+                # try to align durations roughly with window blinks; use last len(window_blinks) durations
+                if window_blinks:
+                    window_durations = blink_durations[-len(window_blinks):] if blink_durations else []
+                else:
+                    window_durations = []
 
-                # 🧮 Calculate blink frequency and avg duration
-                blink_freq = (len(window_blinks) / monitoring_duration) * 60.0
-                avg_blink_duration = np.mean(window_durations) if window_durations else 0
+                blink_freq = (len(window_blinks) / monitoring_duration) * 60.0  # blinks per minute
+                avg_blink_duration = float(np.mean(window_durations)) if window_durations else 0.0
+                yawns_in_window = len([y for y in yawn_timestamps if y >= window_start])
 
+                # Debug prints
                 print(f"🧠 Blinks in {monitoring_duration:.0f}s: {len(window_blinks)}")
                 print(f"🧮 Blink frequency: {blink_freq:.1f} per minute")
-                print(f"⏱️ Avg blink duration: {avg_blink_duration:.2f} sec")
+                print(f"⏱️ Avg blink duration: {avg_blink_duration:.3f} sec")
+                print(f"😴 Yawns (30s window): {yawns_in_window}")
 
-                # ✅ Combine frequency + duration for state evaluation
-                if blink_freq < 20 and avg_blink_duration < 0.25:
-                    driver_state = "Wakefulness"
-                elif 20 <= blink_freq < 30 or 0.25 <= avg_blink_duration < 0.35:
-                    driver_state = "Hypovigilance"
-                elif 30 <= blink_freq < 40 or 0.35 <= avg_blink_duration < 0.5 or len(yawn_timestamps) >= 2:
+                # --- State decisions (mutually exclusive, higher BF/duration => sleepier) ---
+                # Order matters: test most severe first
+                if blink_freq >= 40 or avg_blink_duration >= 1.0 or yawns_in_window >= 3:
+                    driver_state = "Microsleep"
+                elif blink_freq >= 30 or 0.35 <= avg_blink_duration < 1.0 or yawns_in_window >= 2:
                     driver_state = "Drowsiness"
+                elif blink_freq >= 20 or 0.25 <= avg_blink_duration < 0.35:
+                    driver_state = "Hypovigilance"
                 else:
-                    if avg_blink_duration >= 1.5 or len(yawn_timestamps) >= 3:
-                        driver_state = "Microsleep"
+                    driver_state = "Wakefulness"
 
                 update_json()
                 print(f"🟢 Evaluated state: {driver_state}")
 
-                # create playlist once after evaluation
+                # trigger playlist creation once after evaluation
                 if not playlist_created:
                     sp = get_spotify_client()
                     if sp:
@@ -721,11 +742,16 @@ def monitor_driver():
                         print("✅ Playlist created — monitoring stopped.")
                         break
 
-                start_time = now  # reset timer
+                # Reset the monitoring window
+                start_time = now
+                # Keep only the blinks that are inside the new window_start (fresh start)
+                blink_timestamps = [t for t in blink_timestamps if t >= window_start]
+                blink_durations = []  # start durations fresh for the next window
+                yawn_timestamps = [t for t in yawn_timestamps if t >= window_start]
 
-            # UI
+            # UI overlays
             cv2.putText(frame, f"State: {driver_state}", (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
             cv2.putText(frame, f"EAR: {ear:.3f}", (30, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             time_left = max(0, monitoring_duration - (now - start_time))
