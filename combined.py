@@ -15,6 +15,9 @@ from flask import Flask, session, redirect, url_for, request, render_template_st
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import FlaskSessionCacheHandler
+import board
+import busio
+import adafruit_tsl2561
 
 # ---------------- Spotify Credentials ----------------
 CLIENT_ID = "edb8e43341cd46eb8c240d3bfd01e590"
@@ -468,10 +471,33 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
     state = driver_state  
 
     # ---------------- Ask for user inputs ----------------
-    try:
-        lux_input = float(input("💡 Enter ambient lux value (e.g., 50=dark, 300=dim, 1000=bright): "))
-    except Exception:
-        lux_input = 300.0
+
+
+    print("💡 Measuring ambient light for 3 seconds...")
+
+    i2c = busio.I2C(board.SCL, board.SDA)
+    sensor = adafruit_tsl2561.TSL2561(i2c, address=0x29)
+
+    samples = []
+    start_time = time.time()
+
+    while time.time() - start_time < 3:
+        try:
+            lux = sensor.lux
+            if lux is not None:
+                 samples.append(lux)
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+    if samples:
+     lux_input = sum(samples) / len(samples)
+    else:
+        lux_input = 300.0  # fallback
+
+    print(f"💡 Average ambient lux: {lux_input:.1f}")
+# ------------------------------------------------------------------
+
 
     try:
         speed_input = float(input("🚗 Enter simulated driving speed (km/h): "))
