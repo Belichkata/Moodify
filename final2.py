@@ -17,9 +17,11 @@ from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import FlaskSessionCacheHandler
 from openai import OpenAI
-# import board
-# import busio
-# import adafruit_tsl2561
+import board
+import busio
+import adafruit_tsl2561
+from picamera2 import Picamera2
+
 
 openai_client = OpenAI(
     api_key=""
@@ -155,31 +157,31 @@ def get_weather_data():
         print(f"Weather fetch error: {e}")
         return None
 
-# def read_ambient_lux(samples=10, delay=0.1):
-#     """
-#     Reads ambient light from TSL2561 sensor.
-#     Returns average lux or None if sensor fails.
-#     """
-#     try:
-#         i2c = busio.I2C(board.SCL, board.SDA)
-#         sensor = adafruit_tsl2561.TSL2561(i2c)
+def read_ambient_lux(samples=10, delay=0.1):
+     """
+     Reads ambient light from TSL2561 sensor.
+     Returns average lux or None if sensor fails.
+     """
+     try:
+         i2c = busio.I2C(board.SCL, board.SDA)
+         sensor = adafruit_tsl2561.TSL2561(i2c)
 
-#         readings = []
-#         for _ in range(samples):
-#             lux = sensor.lux
-#             if lux is not None:
-#                 readings.append(lux)
-#             time.sleep(delay)
+         readings = []
+         for _ in range(samples):
+             lux = sensor.lux
+             if lux is not None:
+                 readings.append(lux)
+             time.sleep(delay)
 
-#         if readings:
-#             avg_lux = sum(readings) / len(readings)
-#             print(f"💡 Ambient light (sensor): {avg_lux:.1f} lux")
-#             return avg_lux
+         if readings:
+             avg_lux = sum(readings) / len(readings)
+             print(f"💡 Ambient light (sensor): {avg_lux:.1f} lux")
+             return avg_lux
 
-#     except Exception as e:
-#         print(f"⚠️ Lux sensor error: {e}")
+     except Exception as e:
+         print(f"⚠️ Lux sensor error: {e}")
 
-#     return None
+     return None
 
 
 def get_surroundings_from_coords(lat, lon):
@@ -546,12 +548,8 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
     # ---------------- Ask for user inputs ----------------
 
 
-# Simulate ambient light for testing
-    # try:
-    #     lux_input = float(input("Enter simulated ambient light in lux (e.g., 300): "))
-    # except Exception:
-    lux_input = 300.0  # default fallback
-    # lux_input = read_ambient_lux()
+ # Read ambient light from sensor
+    lux_input = read_ambient_lux()
 
 # Fallback if sensor fails
     if lux_input is None:
@@ -754,58 +752,52 @@ def create_smart_playlist_fixed(sp, total_tracks=40, env_lux=None):
 
 EAR_THRESHOLD = 0.21
 
+def start_picam2():
+    picam2 = Picamera2()
+    config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"})
+    picam2.configure(config)
+    picam2.start()
+    time.sleep(1)
+    return picam2
+
+# ---------------- Driver Monitoring ----------------
 def monitor_driver():
     global driver_state, playlist_created, monitoring_active, created_playlist_id, stop_event
 
     detector = dlib.get_frontal_face_detector()
     predictor_path = "models/shape_predictor_68_face_landmarks.dat"
-
     if not os.path.exists(predictor_path):
         print("❌ Missing shape predictor model!")
         return
-
     predictor = dlib.shape_predictor(predictor_path)
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("❌ Camera not available")
-        return
-
+    picam2 = start_picam2()
     driver_state = "Wakefulness"
     start_time = time.time()
     monitoring_duration = 30
-
     blink_timestamps = []
     blink_durations = []
     blink_start_time = None
-
-    print("✅ Camera started successfully")
+    print("✅ Pi Camera started successfully")
 
     while monitoring_active and not stop_event.is_set():
-        ret, frame = cap.read()
-        if not ret:
-            print("❌ Frame read failed")
-            break
-
+        frame = picam2.capture_array()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rects = detector(gray, 0)
         now = time.time()
-
         ear = 0.0
 
         if rects:
             rect = rects[0]
             shape = predictor(gray, rect)
             shape = face_utils.shape_to_np(shape)
-
             left_eye = shape[LEFT_EYE]
             right_eye = shape[RIGHT_EYE]
-
             left_ear = eye_aspect_ratio(left_eye)
             right_ear = eye_aspect_ratio(right_eye)
             ear = (left_ear + right_ear) / 2.0
 
-            if ear < EAR_THRESHOLD:
+            if ear < EYE_AR_THRESH:
                 if blink_start_time is None:
                     blink_start_time = now
             else:
@@ -819,8 +811,8 @@ def monitor_driver():
         blink_timestamps = [t for t in blink_timestamps if now - t <= 60]
 
         if now - start_time >= monitoring_duration:
-            blink_freq = (len(blink_timestamps) / monitoring_duration) * 60
-            avg_bd = sum(blink_durations) / len(blink_durations) if blink_durations else 0
+            blink_freq = (len(blink_timestamps)/monitoring_duration)*60
+            avg_bd = sum(blink_durations)/len(blink_durations) if blink_durations else 0
 
             if blink_freq < 15:
                 driver_state = "Wakefulness"
@@ -844,18 +836,14 @@ def monitor_driver():
 
         cv2.putText(frame, f"State: {driver_state}", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
         cv2.imshow("Driver Monitor", frame)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
-    cap.release()
     cv2.destroyAllWindows()
-    print("🛑 Camera stopped")
-
-
-
+    picam2.stop()
+    print("🛑 Pi Camera stopped")
 
 # ---------------- Flask Routes ----------------
 @app.route("/")
@@ -893,12 +881,10 @@ def start():
         return redirect(sp_oauth.get_authorize_url())
     if not monitoring_active:
         monitoring_active = True
-        # ✅ Use lambda so no unwanted args get passed to monitor_driver()
         stop_event.clear()
-    monitoring_thread = threading.Thread(target=monitor_driver, daemon=True)
-    monitoring_thread.start()
+        monitoring_thread = threading.Thread(target=monitor_driver, daemon=True)
+        monitoring_thread.start()
     return redirect(url_for("home"))
-
 
 @app.route("/stop", methods=["POST"])
 def stop():
@@ -908,11 +894,10 @@ def stop():
     if monitoring_active:
         monitoring_active = False
         if monitoring_thread:
-            stop_event.set()  # signal monitor_driver() loop to stop
+            stop_event.set()
             monitoring_thread.join(timeout=2)
             print("🛑 Monitoring thread stopped.")
 
-    # Delete playlist if it exists
     if created_playlist_id and sp:
         try:
             sp.current_user_unfollow_playlist(created_playlist_id)
